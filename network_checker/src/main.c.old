@@ -1,0 +1,137 @@
+/*
+ * ICMP Socket Example in Zephyr RTOS
+ * 
+ * This example demonstrates how to create an ICMP socket,
+ * send ping requests, and receive ICMP echo replies.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/net/net_ip.h>
+#include <zephyr/net/icmp.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/usb/usb_device.h>
+
+LOG_MODULE_REGISTER(icmp_socket_example, LOG_LEVEL_DBG);
+
+/* Configuration parameters */
+#define PING_TIMEOUT_MS 1000
+#define PING_REPEAT_COUNT 4
+#define REMOTE_ADDR "8.8.8.8"  // Example: Google's DNS server
+
+/* ICMP Echo Request structure */
+struct icmp_echo_request {
+    struct net_icmp_header icmp_header;
+    uint16_t identifier;
+    uint16_t sequence_number;
+    char payload[32];
+};
+
+/* Function to prepare ICMP Echo Request */
+static int prepare_icmp_request(struct icmp_echo_request *request, 
+                                 uint16_t identifier, 
+                                 uint16_t sequence_number) {
+    /* Initialize ICMP header */
+    request->icmp_header.type = NET_ICMP_ECHO_REQUEST;
+    request->icmp_header.code = 0;
+    request->icmp_header.checksum = 0;
+
+    /* Set identifier and sequence number */
+    request->identifier = identifier;
+    request->sequence_number = sequence_number;
+
+    /* Prepare payload */
+    snprintf(request->payload, sizeof(request->payload), 
+             "Zephyr ICMP Ping #%d", sequence_number);
+
+    return 0;
+}
+
+/* Main application thread */
+void main(void) {
+    const struct device *dev;
+	uint32_t dtr = 0;
+
+	/* Initialize USB */
+	if (usb_enable(NULL)) {
+		LOG_ERR("Failed to enable USB");
+		return -1;
+	}
+
+	/* Wait for the USB device to be ready */
+	dev = DEVICE_DT_GET_ONE(zephyr_cdc_acm_uart);
+	if (!device_is_ready(dev)) {
+		LOG_ERR("CDC ACM device not ready");
+		return -1;
+	}
+
+	/* Wait for DTR to be set before starting shell */
+	while (!dtr) {
+		uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
+		k_sleep(K_MSEC(100));
+	}
+
+    LOG_INF("W5500 DHCP and Internet Connectivity Monitor");
+
+    int sock, ret;
+    struct sockaddr_in remote_addr = {0};
+    struct icmp_echo_request request;
+    char recv_buffer[128];
+
+    /* Convert IP address */
+    zsock_inet_pton(AF_INET, REMOTE_ADDR, &remote_addr.sin_addr);
+    remote_addr.sin_family = AF_INET;
+
+    /* Create raw socket for ICMP */
+    sock = zsock_socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (sock < 0) {
+        LOG_ERR("Failed to create ICMP socket: %d", errno);
+        return;
+    }
+
+    /* Set socket timeout */
+    struct timeval timeout = {
+        .tv_sec = 0,
+        .tv_usec = PING_TIMEOUT_MS * 1000
+    };
+    zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    /* Ping loop */
+    for (int i = 0; i < PING_REPEAT_COUNT; i++) {
+        /* Prepare ICMP request */
+        prepare_icmp_request(&request, 
+                             k_uptime_get() & 0xFFFF,  // Use uptime as identifier 
+                             i);
+
+        /* Calculate ICMP checksum */
+        request.icmp_header.checksum = net_calc_chksum_icmp(
+            (uint8_t *)&request, 
+            sizeof(struct icmp_echo_request)
+        );
+
+        /* Send ICMP Echo Request */
+        ret = zsock_sendto(sock, &request, sizeof(request), 0, 
+                     (struct sockaddr *)&remote_addr, 
+                     sizeof(remote_addr));
+        if (ret < 0) {
+            LOG_ERR("Failed to send ICMP packet: %d", errno);
+            break;
+        }
+
+        /* Receive ICMP Echo Reply */
+        socklen_t addr_len = sizeof(remote_addr);
+        ret = zsock_recvfrom(sock, recv_buffer, sizeof(recv_buffer), 0, 
+                       (struct sockaddr *)&remote_addr, &addr_len);
+        if (ret < 0) {
+            LOG_ERR("Failed to receive ICMP reply: %d", errno);
+            continue;
+        }
+
+        LOG_INF("Received ICMP Echo Reply from %s", REMOTE_ADDR);
+        k_msleep(500);  // Delay between pings
+    }
+
+    /* Close socket */
+    zsock_close(sock);
+}
