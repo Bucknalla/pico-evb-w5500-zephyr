@@ -16,6 +16,11 @@ manifest:
         name-allowlist:
           - cmsis
           - hal_rpi_pico
+    - name: note-zephyr
+      path: modules/note-zephyr
+      revision: main
+      submodules: true
+      url: https://github.com/blues/note-zephyr
 
   self:
     path: app
